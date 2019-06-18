@@ -64,11 +64,11 @@ The dataset being reanalyzed is studying the differences in macaque natural kill
   In this analysis, a subset of the data has been chosen for simplicity, two time points were chosen: six hours after the prime vaccination (PPH6) and six hours after the boost vaccination (PBH6). The dataset was chosen as it was released gated. Most studies have very difficult to reproduce gating mechanisms. 
 
 ##Download data
-The data can be accessed with the package `FlowRepositoryR` to download `fcs` files from [FlowRepository](http://flowrepository.org/id/FR-FCM-ZYPY). Only downloaded files 6 hours after prime vaccination (PPD000H06) and 6 hours after boost vaccination (PBD000H06).
+The data can be accessed with the package `FlowRepositoryR` to download `fcs` files from [FlowRepository](http://flowrepository.org/id/FR-FCM-ZYPY). Only download files 6 hours after prime vaccination (PPD000H06) and 6 hours after boost vaccination (PBD000H06).
 
 ## Data formatting - sample table
 
-After downloading the data, a sample table is created by parsing the `fcs` filenames.
+After downloading the data, a sample table is created by parsing the `fcs` filenames. A local folder was created "Subselection H6PP&PB".
 ```{r}
 fcs_filesVA1 = list.files(path = "Subselection H6PP&PB", pattern = "fcs")
 map_time = function(x) {
@@ -270,7 +270,11 @@ ggplot(df_samples_all, aes_string(x = "TNFa", color = "term")) +
   geom_density() + 
   facet_wrap(~donor)
 ```
-From the plots about IFNg, it can be seen that in most animals, IFNg is higher after the boost vaccination has been administered.
+From the plots about IFNg, it can be seen that in most animals, there is no strong difference in IFNg.
+CD16 is incredily low or absent in all animals in both conditions.
+CD66 demonstrates a clear shift in the boost condition, with more CD66 present and in higher density.
+CD45 shows a similar shift to CD66 although not quite as large a difference.
+TNFa is present in very low quantities in all conditions.
 
 ## Two-Dimensional Histograms
 
@@ -304,9 +308,10 @@ ggplot(df_samples_all, aes_string(x = "CD66", y = "CD56")) +
   coord_fixed() +
   facet_wrap(~donor)
 ```
-CD3 - CD8 plot is not confirming the gating as they should be CD3 negative and CD8 positive. There seems to be a wide variety.
-
+Il-10 - IFNg plot shows that generally both markers are low.
+CD3 - CD8 plot is not confirming the gating as they should be CD3 negative and CD8 positive. There seems to be a wide variety and a skew in the highest amount of cells being more CD3 positive and CD8 negative, rather then the other way around.
 Concerning the CD56 and CD16, it looks like a predominance of CD56 bright CD16 dim cells. 
+All animals seem to have similar histograms.
 
 ###Two-dimensional histograms for group comparisons.
 
@@ -683,14 +688,7 @@ Without modeling the donor effect, bootstrapping can be done which also gives go
 
 In comparison, Palgen et al. (2018) found the following proteins to be significantly upregulated by Natural Killer cells in the boost condition: Granzyme B, CD107a, perforin, CD69, CD66, CCR5, CD11c, CD16, and, slightly less strongly, CD11a. They venture a number of possible explanations to these findings in their discussion section. 
 
-The overlap between the two results is relatively similar, both found the two following markers: CD66 and CD107a. For all other proteins, the other method did not find the same result. This high discrepancy may be due to a number of reasons.
-- Sample size is very small and there is very high between donor variation
-- Different statistical methods were applied (with different regularization)
-  - PERSONAL: Look more into stats!
-- Almost all proteins do not seem to differ strongly between the two conditions and have rather large standard deviations (PRODUCE GRAPH? look at SD and Boost - Prime graph with zero line - in PLMM - can do equivalent?)
-- Another explanation for the difference is that I am only using a subset of the data. For simplicity sake to not incorporate the different time points.
-
-#Conclusion
+The overlap between the two results is relatively similar, both found the two following markers: CD66 and CD107a. For all other proteins, the other method did not find the same result. This high discrepancy may be due to a number of reasons. There are few donors and high variation between them. Different statistical methods were applied. Furthremore, I am only using a subset of the data. 
 
 # Session Info {.unnumbered}
 

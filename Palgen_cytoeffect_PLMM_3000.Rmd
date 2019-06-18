@@ -20,8 +20,9 @@ Apply the Poisson Log-Normal Mixed Model of the cytoeffect package to the Palgen
 
 #cytoeffect - 3 parts: 
 A) logistic linear mixed model (LLMM); 
-B) poisson log-normal mixed model (PLMM); 
-This is part B.
+B) poisson log-normal mixed model (PLMM) - 2000 cell subset;
+C) poisson log-normal mixed model (PLMM) - 3000 cell subset;
+This is part C.
 
 # Prerequisites
 
@@ -31,7 +32,7 @@ This is part B.
 ncells = 3000
 seed = 0xdada
 ncores = parallel::detectCores()
-cytof_data = "se_palgen2019vaccine.Rdata"
+cytof_data = "se_palgen2019vaccine.Rdata" #created with CytoGLMM
 prefit_PLMM = paste0("cytoeffect_plmm_ncells_",ncells,".Rdata")
 prefit_PLMM
 ```
@@ -177,6 +178,7 @@ tb %>% arrange(desc(Rhat))
 tb %>% summarize(min = min(n_eff), max = max(n_eff))
 tb %>% summarize(min = min(Rhat), max = max(Rhat))
 ```
+Rhat very high for some correlation coefficients.
 
 Further explore why some standard deviations are so large.
 
@@ -382,8 +384,6 @@ plist = plot(obj, type = "Cor")
 plist
 ```
 
-Comment: All marker correlation tables (post-prime, post-boost, and donor) seem to not correlate at all. Table seems virtually white.
-
 ```{r}
 plot.cytoeffect_poisson = function(obj, type = "beta",
                                    selection = obj$protein_names) {
@@ -457,7 +457,6 @@ ggsave(filename = "posterior_mds_latent_variable_mu_scaled_3000.pdf", width = 10
 cytoeffect::plot_mds(obj, asp = FALSE)
 ggsave(filename = "posterior_mds_latent_variable_mu_unscaled_3000.pdf", width = 10, height = 5)
 ```
-This plot further confirms what has been shown throughout this analysis. Post-prime and post-boost do not differ significantly. They are clearly overlapped. The proteins are all clustered and not easy to read. The MDS1 only accounts for 13.4% which is relatively small.
 
 ###Pairwise correlation change between conditions.
 
@@ -579,8 +578,6 @@ plot_correlation_graph(lambda = 0.9)
 plot_correlation_graph(lambda = 0.8)
 plot_correlation_graph(lambda = 0.7)
 ```
-
-Interesting to see which proteins correlate more strongly with each other.
 
 ###Combine plot for paper.
 
@@ -727,7 +724,7 @@ gof_obsv_d %<>% mutate(subset = "Cell Subset D")
 gof_pred_d %<>% mutate(subset = "Cell Subset D")
 ```
 
-Combined plot for paper.
+Combined plot.
 
 ```{r goodness_of_fit_combined}
 # combine observed statistic
@@ -746,10 +743,6 @@ ggplot(gof_pred_all, aes(statistic, fill = term)) +
   theme(legend.position="bottom")
 ggsave(filename = "goodness_of_fit.pdf", 
        width = 8, height = 5)
-
-#save
-save(gof_obsv_all, file = "PLMM_gof_obs_3000.Rdata")
-save(gof_pred_all, file = "PLMM_gof_pred_3000.Rdata")
 ```
 
 # Session Info {.unnumbered}
@@ -757,5 +750,3 @@ save(gof_pred_all, file = "PLMM_gof_pred_3000.Rdata")
 ```{r session_info}
 sessionInfo()
 ```
-
-# References {.unnumbered}

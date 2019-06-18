@@ -20,7 +20,8 @@ Apply the Poisson Log-Normal Mixed Model of the cytoeffect package to the Palgen
 
 #cytoeffect - 3 parts: 
 A) logistic linear mixed model (LLMM); 
-B) poisson log-normal mixed model (PLMM); 
+B) poisson log-normal mixed model (PLMM) - 2000 cell subset;
+C) poisson log-normal mixed model (PLMM) - 3000 cell subset;
 This is part B.
 
 # Prerequisites
@@ -31,7 +32,7 @@ This is part B.
 ncells = 2000
 seed = 0xdada
 ncores = parallel::detectCores()
-cytof_data = "se_palgen2019vaccine.Rdata"
+cytof_data = "se_palgen2019vaccine.Rdata" #created with CytoGLMM
 prefit_PLMM = paste0("cytoeffect_plmm_ncells_",ncells,".Rdata")
 prefit_PLMM
 ```
@@ -138,7 +139,6 @@ df_samples$term %<>% factor(levels = c("Post-prime",
                                               "Post-boost"))
 ```
 
-
 ```{r poisson_sampling}
 if(file.exists(prefit_PLMM)) {
   load(file = prefit_PLMM)
@@ -159,6 +159,7 @@ Postprocessing of posterior samples. Traceplot of posterior samples.
 rstan::traceplot(obj$fit_mcmc, inc_warmup = FALSE, pars = c("beta[1,1]", "beta[1,2]", "beta[2,1]", "beta[2,2]", "beta[3,1]", "beta[3,2]", "beta[4,1]", "beta[4,2]", "beta[5,1]", "beta[5,2]", "beta[6,1]", "beta[6,2]", "beta[7,1]", "beta[7,2]", "beta[8,1]", "beta[8,2]", "beta[9,1]", "beta[9,2]", "beta[10,1]", "beta[10,2]", "beta[11,1]", "beta[11,2]", "beta[12,1]", "beta[12,2]", "beta[13,1]", "beta[13,2]", "beta[14,1]", "beta[14,2]", "beta[15,1]", "beta[15,2]"))
 rstan::traceplot(obj$fit_mcmc, inc_warmup = FALSE, pars = c("beta[16,1]", "beta[16,2]", "beta[17,1]", "beta[17,2]", "beta[18,1]", "beta[18,2]", "beta[19,1]", "beta[19,2]", "beta[20,1]", "beta[20,2]", "beta[21,1]", "beta[21,2]", "beta[22,1]", "beta[22,2]", "beta[23,1]", "beta[23,2]", "beta[24,1]", "beta[24,2]", "beta[25,1]", "beta[25,2]", "beta[26,1]", "beta[26,2]", "beta[27,1]", "beta[27,2]", "beta[28,1]", "beta[28,2]", "beta[29,1]", "beta[29,1]", "beta[30,1]", "beta[30,2]", "beta[31,1]", "beta[31,2]"))
 ```
+HMC diagnostics seem good at first glance.
 
 Some more MCMC diagnostics. According to empirically findings, Rhat > 1.1 is usually indicative of problems in the fit.
 
@@ -177,6 +178,7 @@ tb %>% arrange(desc(Rhat))
 tb %>% summarize(min = min(n_eff), max = max(n_eff))
 tb %>% summarize(min = min(Rhat), max = max(Rhat))
 ```
+Rhat is above the recommended 1.1, indicating issues with convergence. 
 
 ```{r}
 pars_str = c(
@@ -309,7 +311,7 @@ plist = plot(obj, type = "Cor")
 plist
 ```
 
-Comment: All marker correlation tables (post-prime, post-boost, and donor) seem to not correlate at all. Table seems virtually white.
+CD66 negatively correlates with many proteins in both post-prime and post-boost. Donor correlations are not clearly apparent which is probably due to the small donor sample size. 
 
 ###Multivariate posterior MDS plots.
 
@@ -319,7 +321,6 @@ ggsave(filename = "posterior_mds_latent_variable_mu_scaled_2000.pdf", width = 10
 cytoeffect::plot_mds(obj, asp = FALSE)
 ggsave(filename = "posterior_mds_latent_variable_mu_unscaled_2000.pdf", width = 10, height = 5)
 ```
-This plot further confirms what has been shown throughout this analysis. Post-prime and post-boost do not differ significantly. They are clearly overlapped. The proteins are all clustered and not easy to read. The MDS1 and MDS2 only account for a small amount of variance.
 
 ###Pairwise correlation change between conditions.
 
@@ -441,8 +442,6 @@ plot_correlation_graph(lambda = 0.9)
 plot_correlation_graph(lambda = 0.8)
 plot_correlation_graph(lambda = 0.7)
 ```
-
-Interesting to see which proteins correlate more strongly with each other. 
 
 ###Combine plot for paper.
 
@@ -608,10 +607,6 @@ ggplot(gof_pred_all, aes(statistic, fill = term)) +
   theme(legend.position="bottom")
 ggsave(filename = "goodness_of_fit.pdf", 
        width = 8, height = 5)
-
-#save
-save(gof_obsv_all, file = "PLMM_gof_obs_2000.Rdata")
-save(gof_pred_all, file = "PLMM_gof_pred_2000.Rdata")
 ```
 
 # Session Info {.unnumbered}
@@ -619,5 +614,3 @@ save(gof_pred_all, file = "PLMM_gof_pred_2000.Rdata")
 ```{r session_info}
 sessionInfo()
 ```
-
-# References {.unnumbered}

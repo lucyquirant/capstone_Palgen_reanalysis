@@ -16,7 +16,8 @@ Apply the Logistic Linear Mixed Model of the cytoeffect package to the Palgen HI
 
 #cytoeffect - 2 parts: 
 A) logistic linear mixed model (LLMM); 
-B) poisson log-normal mixed model (PLMM); 
+B) poisson log-normal mixed model (PLMM) - 2000 cell subset;
+C) poisson log-normal mixed model (PLMM) - 3000 cell subset;
 This is part A.
 
 ```{r setup, include=FALSE}
