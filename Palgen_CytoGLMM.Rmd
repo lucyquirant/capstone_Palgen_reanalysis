@@ -1,0 +1,699 @@
+---
+title: "Palgen CytoGLMM"
+author: "Lucy Quirant"
+date: "4/22/2019"
+output:
+  html_document:
+    code_folding: show
+    highlight: tango
+    toc: true
+    toc_depth: 3
+    number_sections: true
+---
+
+# Goal
+
+This is a bachelor thesis to re-analyse mass cytometry data using two new R packages: CytoGLMM and cytoeffect on a dataset with a larger number of donors. The goal is to replicate biological conclusions with other software and uncover new biological findings.
+
+#Prerequisites
+
+Install packages.
+```{r install_packages, warning=FALSE, message=FALSE, eval=FALSE}
+pkgs_needed = c("devtools","tidyverse","magrittr","FlowRepositoryR",
+                "flowCore","openCyto","scales","parallel",
+                "RColorBrewer","ggcorrplot","SummarizedExperiment",
+                "lme4","lmerTest")
+letsinstall = setdiff(pkgs_needed, installed.packages())
+if (length(letsinstall) > 0) {
+  BiocManager::install(letsinstall)
+}
+# package is still private
+devtools::install_github("ChristofSeiler/CytoGLMM")
+# Bioconductor version breaks when updating to ggplot2 v3.0
+devtools::install_github("RGLab/ggcyto", ref="trunk")
+```
+
+Load packages.
+```{r load_packages, message= FALSE, error=FALSE}
+library("CytoGLMM")
+library("tidyverse")
+library("magrittr")
+library("FlowRepositoryR")
+library("flowCore")
+library("openCyto")
+library("ggcyto")
+library("scales")
+library("parallel")
+library("RColorBrewer")
+library("ggcorrplot")
+library("SummarizedExperiment")
+library("lme4")
+library("lmerTest")
+```
+
+#Introduction
+##Mass cytometry
+Mass cytometry (MC) is a method that examines multiple parameters in cells at a single-cellular level in a high throughput manner. It is derived from flow cytometry and mass spectrometry. It can measure up to 40 parameters per cell, usually proteins. Mass cytometry focuses on proteins, but can also measure posttranslational modifications, products from proteolysis and in some rare cases RNA (Frei et al., 2016). Traditionally, cells were analyzed in bulk, but new technologies such as MC allow for the identification of each cell and therefore much more detailed information about the heterogeneity of cells  (Spitzer & Nolan, 2015). The typical workflow of an MC experiment involves cells being labeled with antibodies that have been previously chelated to heavy metal stable isotopes, such as lanthanides. They are then fed into a chamber with argon gas that turns the cells into a gaseous and ionized form. A quadrupole then selects for the particles labeled with heavy metal isotopes, and feeds them into a time-of-flight mass spectrometer that accelerates the particles with the help of an electrical field. At the end, a detector measures the mass-to-charge ratio of the particles allowing their identification. Mass cytometry has a wide range of applications, and has mainly been used in immunology, infectious diseases, oncology and drug development (Di Palma & Bodenmiller, 2015; Spitzer & Nolan, 2016). 
+
+##Differential expression analysis: 'CytoGLMM' & 'cytoeffect'
+Mass cytometry can process huge amounts of cells which raises issues in processing such high dimensional data. To comprehend and visualize this vast amount of data, researchers often use summary statistics, thereby losing valuable information in these multivariate datasets. Christof Seiler and his team at Stanford (2019) have developed two new R packages to address this issue, and explore data in an uncompressed form thereby improving statistical power and replicability. When analyzing mass cytometry data, there are two main steps: identifying the cells in a process called gating and then comparing different expression levels across cell types and experiment conditions. This differential expression is measured by performing regression, the R packages being used in this paper for this are CytoGLMM and Cytoeffect. With the use of two statistical mixed models, they explicitly look at marker correlations which allows to account explicitly for cell-to-cell and donor-to-donor variability. One advantage of this multivariate method is to highlight possible different confounders in the data. The two models used are the multivariate Poisson log-normal model and the logistic mixed effect model which give different conclusions and used together can give more insight into the data.
+
+#Data: HIV vaccination
+##Dataset characteristics
+The dataset being reanalyzed is studying the differences in macaque natural killer (NK) cell protein expression between a first and second vaccination (Palgen et al., 2019). Four macaques (BB078, BB231, BC641, BD620) were vaccinated twice: a prime and a boost injection. Whole blood levels were measured at numerous time points: before vaccination, after the first vaccination at six timepoints, and after the boost four times. There is a two month interval between the two vaccinations. They received the ANRS MVA HIV-B vaccine, encoding HIV-Gag, Pol, and Nef proteins. Not used in this analysis, a second group of animals received a subcutaneous injection with a buffer liquid to control that the reactions observed with MVA were specific to that vaccine. The blood was processed, stained, and acquired with a CyTOF (Fluidigm). The data was bead normalized (Finck et al., 2013) and gated using the software SPADE. NK cell phenotypic families were then determined using hierarchical clustering. To classify immune profiles distinguishing post-prime and post-boost NK cells, least absolute shrinkage and selection operator (LASSO) and linear discriminant analysis (LDA) were performed. The data was released normalized and gated on Flow Repository. 
+  In this analysis, a subset of the data has been chosen for simplicity, two time points were chosen: six hours after the prime vaccination (PPH6) and six hours after the boost vaccination (PBH6). The dataset was chosen as it was released gated. Most studies have very difficult to reproduce gating mechanisms. 
+
+##Download data
+The data can be accessed with the package `FlowRepositoryR` to download `fcs` files from [FlowRepository](http://flowrepository.org/id/FR-FCM-ZYPY). Only downloaded files 6 hours after prime vaccination (PPD000H06) and 6 hours after boost vaccination (PBD000H06).
+
+## Data formatting - sample table
+
+After downloading the data, a sample table is created by parsing the `fcs` filenames.
+```{r}
+fcs_filesVA1 = list.files(path = "Subselection H6PP&PB", pattern = "fcs")
+map_time = function(x) {
+  if (str_detect(x, "PPD000H06")) "Post-prime" 
+  else if (str_detect(x, "PBD000H06")) "Post-boost"
+  else NA
+}
+
+sample_tableVA1 = tibble(
+  donor = str_extract(fcs_filesVA1, "_B[B-D]{1}..."),
+  term = sapply(fcs_filesVA1, map_time) %>% as.factor,
+  file_name = paste0("Subselection H6PP&PB/",fcs_filesVA1)
+)
+sample_tableVA1$donor = gsub("_", "", sample_tableVA1$donor)
+
+sample_tableVA1
+```
+
+##Marker table
+
+A marker table is created by extracting the marker isotopes and protein names. A third column is added to determine whether the markers were used for identifying cells (phenotype), are functional proteins, or were unused. Palgen et al. (2019) state in their paper that due to low reactivity multiple markers needed to be excluded from the analysis.
+```{r}
+# names of markers used for gating extracted from the paper
+map_type = function(x) {
+  if (str_detect(x, paste(c("CD66", "HLADR", "CD3", "CD107a", "CD8", "CD45", "GranzymeB", "CD56", "CD62L", "CD4", "CD11a", "CD2", "CD7", "NKG2D", "CD11c", "CD69", "CD25", "CD16", "CCR5", "CXCR4", "CD14", "perforine", "NKG2A", "CD20", "CCR7"),collapse = '|'))) "phenotype"
+  else if (str_detect(x, paste(c("Di", "Time", "Cell_length", "cells", "File Number"),collapse = '|'))) "unused"
+  else "function"
+}
+
+#Creating marker table
+y <- sample_tableVA1$file_name[1]
+fcs = read.FCS(y, transformation = FALSE)
+
+isotope = pData(parameters(fcs))[,"name"]
+protein_name = pData(parameters(fcs))[,"desc"]
+type = sapply(protein_name, map_type)
+tb_marker = tibble(isotope, protein_name, type)
+tb_marker
+
+#deleting before last two rows, 43 & 44 as their protein_name was 'cells' 
+tb_marker <- tb_marker[-c(43,44), ]
+tb_marker
+```
+
+As claimed by the authors (Palgen et al., 2019) the data has been normalized and gated. The cells contained are assumed to be natural killer (NK) cells as the paper only focuses on NK cells. 
+
+###Combine the sample and marker dataset
+
+```{r}
+# setting computational resources
+ncores = parallel::detectCores()
+```
+
+```{r, message= FALSE, error=FALSE}
+# load data
+fset = read.ncdfFlowSet(sample_tableVA1$file_name, mc.cores = ncores) 
+pData(fset) = cbind(pData(fset),sample_tableVA1)
+df_samples = lapply(seq(fset), function(sample_id) {
+    marker_ids = which(fset@colnames %in% tb_marker$isotope)
+    exprs = as_tibble(exprs(fset[[sample_id]]))[,marker_ids]
+    file_name = pData(fset[sample_id])$file_name
+    exprs %>% add_column(file_name)
+  }) %>% bind_rows
+str(df_samples)
+```
+
+Re-naming columns
+```{r}
+df_samples %<>% inner_join(sample_tableVA1,by = "file_name")
+oldnames = tb_marker$isotope
+newnames = tb_marker$protein_name
+df_samples %<>% rename_at(vars(oldnames), ~ newnames)
+str(df_samples)
+
+#factor
+df_samples$term %<>% factor(levels = c("Post-prime",
+                                           "Post-boost"))
+```
+
+Cell counts listed per donor and condition
+
+```{r list_cells_per_donor}
+table(df_samples$donor,df_samples$term)
+```
+
+In a first time, we will focus on the functional proteins.
+In a second step, a larger group of proteins could be looked at. The original authors used all 31 markers (function & phenotype), excluding unused proteins.
+
+```{r select_proteins}
+#1. only function proteins
+protein_names_func = tb_marker %>% 
+  dplyr::filter(type == "function") %>%
+  .$protein_name
+protein_names_func
+
+#2. all used proteins
+protein_names_all = tb_marker %>% 
+  dplyr::filter(type != "unused") %>%
+  .$protein_name
+protein_names_all
+```
+
+Declare the columns in `df_samples` that are not protein markers. In our example, we have donor ID (animal), time point when the sample was collected (before or after the boost vaccination), `FCS` filename.
+
+```{r}
+sample_info_names = c(names(sample_tableVA1))
+sample_info_names
+```
+
+# Data Exploration 
+
+## Transform Data
+
+The arcsin (x/5) transformation is applied as it models noise non-uniformly, corrects for negative values and normally distributed cell types. More in methodology section of thesis in the section about logistic regression in the generalised linear models part.
+
+```{r transform}
+trans_func = function(x) asinh(x/5)
+#with functional markers
+df_samples_tfm = df_samples %>% mutate_at(protein_names_func, trans_func)
+
+#with all used markers
+df_samples_all = df_samples %>% mutate_at(protein_names_all, trans_func)
+
+#factor the term so that post-prime comes first as it chronologically does
+df_samples_tfm$term = factor(df_samples_tfm$term, levels = c("Post-prime", "Post-boost"))
+```
+
+## Multidimensional scaling (MDS)
+
+MDS on median marker expression of NK cells.
+
+```{r plot_mds_nk, fig.wide=TRUE}
+CytoGLMM::plot_mds(df_samples_tfm,
+                   protein_names = protein_names_func,
+                   sample_info_names = sample_info_names,
+                   color = "term")
+```
+
+##Heatmap
+
+Heatmap of median marker expression of NK cells for functional proteins.
+
+```{r plot_heatmap}
+CytoGLMM::plot_heatmap(df_samples_tfm,
+                       protein_names = protein_names_func,
+                       sample_info_names = sample_info_names,
+                       arrange_by_1 = "term")
+```
+There is no distinctive difference in protein concentration between post-prime and post-boost cases. TNFq, Ki67, IL4, and MIP1B are not present in high concentrations. IFNg and IL10 have higher quantities at both time points.
+
+Heatmap of median marker expression of NK cells for all used proteins.
+
+```{r plot_heatmap_all}
+CytoGLMM::plot_heatmap(df_samples_all,
+                       protein_names = protein_names_all,
+                       sample_info_names = sample_info_names,
+                       arrange_by_1 = "term")
+
+CytoGLMM::plot_heatmap(df_samples_all,
+                       protein_names = protein_names_all [which(protein_names_all != "CD66")],
+                       sample_info_names = sample_info_names,
+                       arrange_by_1 = "term")
+```
+Interesting to look at all protein markers, does not seem to be a strong visual difference between two groups. CD66 is very highly present, goes up to above 4 on scale. When CD66 is removed, then there are still very high amounts of CD45 and perforine. There is markedly more CD66 and CD45 in post-boost in comparison to post-prime. CD11a is also more present in post-boost in comparison to the post-prime condition. 
+
+## PCA
+
+PCA plot of NK cells.
+
+```{r plot_prcomp_nk, fig.wide = TRUE}
+CytoGLMM::plot_prcomp(df_samples_tfm,
+                      protein_names = protein_names_func,
+                      color_var = "term",
+                      repel = TRUE)
+```
+
+## Density Plots
+
+Density plots of the marker IFNg, CD16, CD66, CD45, and TNFa for all donors.
+
+```{r density_plot, fig.wide=TRUE}
+ggplot(df_samples_tfm, aes_string(x = "IFNg", color = "term")) + 
+  geom_density() + 
+  facet_wrap(~donor)
+
+ggplot(df_samples_tfm, aes_string(x = "CD16", color = "term")) + 
+  geom_density() + 
+  facet_wrap(~donor)
+
+ggplot(df_samples_all, aes_string(x = "CD66", color = "term")) + 
+  geom_density() + 
+  facet_wrap(~donor)
+
+ggplot(df_samples_all, aes_string(x = "CD45", color = "term")) + 
+  geom_density() + 
+  facet_wrap(~donor)
+
+ggplot(df_samples_all, aes_string(x = "TNFa", color = "term")) + 
+  geom_density() + 
+  facet_wrap(~donor)
+```
+From the plots about IFNg, it can be seen that in most animals, IFNg is higher after the boost vaccination has been administered.
+
+## Two-Dimensional Histograms
+
+Two-dimensional histograms for plotting IFNg and IL10, two functional markers for all donors. Furthermore, histograms are created for CD3 and CD8, CD16 and CD56, and CD66 and CD56.
+
+```{r hist2_donors}
+colorscale = scale_fill_gradientn(
+  colors = rev(brewer.pal(9, "YlGnBu")), 
+  values = c(0, exp(seq(-5, 0, length.out = 100)))
+  )
+ggplot(df_samples_tfm, aes_string(x = "IFNg", y = "IL10")) + 
+  geom_hex(bins = 64) +
+  colorscale + 
+  coord_fixed() +
+  facet_wrap(~donor)
+
+ggplot(df_samples_all, aes_string(x = "CD3", y = "CD8")) + 
+  geom_hex(bins = 64) +
+  colorscale + 
+  coord_fixed() 
+
+ggplot(df_samples_all, aes_string(x = "CD16", y = "CD56")) + 
+  geom_hex(bins = 64) +
+  colorscale + 
+  coord_fixed() +
+  facet_wrap(~donor)
+
+ggplot(df_samples_all, aes_string(x = "CD66", y = "CD56")) + 
+  geom_hex(bins = 64) +
+  colorscale + 
+  coord_fixed() +
+  facet_wrap(~donor)
+```
+CD3 - CD8 plot is not confirming the gating as they should be CD3 negative and CD8 positive. There seems to be a wide variety.
+
+Concerning the CD56 and CD16, it looks like a predominance of CD56 bright CD16 dim cells. 
+
+###Two-dimensional histograms for group comparisons.
+
+```{r hist2_groups}
+ggplot(df_samples_tfm, aes_string(x = "IFNg", y = "IL10")) + 
+  geom_hex(bins = 64) +
+  colorscale + 
+  coord_fixed() +
+  facet_wrap(~term)
+
+ggplot(df_samples_all, aes_string(x = "CD66", y = "CD56")) + 
+  geom_hex(bins = 64) +
+  colorscale + 
+  coord_fixed() +
+  facet_wrap(~term)
+
+ggplot(df_samples_all, aes_string(x = "CD16", y = "CD56")) + 
+  geom_hex(bins = 64) +
+  colorscale + 
+  coord_fixed() +
+  facet_wrap(~term)
+```
+With CD56 and CD66 a clear shift is visible to more CD66 positive NK cells in the boost condition, both CD56 positive and negative. A general right shift is seen.
+
+Amount of CD16 seems not to change much between two conditions except for a few outliers. There is a shift of the bulk having less CD56 but tail end of CD56 is slightly denser.
+
+###NK cell count. List the smallest and largest.
+
+```{r cell_count}
+df_samples_tfm %>% group_by(term,donor) %>% tally %>% arrange(n)
+df_samples_tfm %>% group_by(term,donor) %>% tally %>% arrange(desc(n))
+```
+
+## Marker Correlations
+
+Plot marker correlations for functional proteins.
+
+```{r marker_correlations}
+mcor = cor(df_samples_tfm %>% dplyr::select(protein_names_func))
+ggcorrplot(mcor, hc.order = TRUE, type = "lower", 
+           outline.col = "lightgray",
+           colors = c("#6D9EC1", "white", "#E46726"))+
+  theme(axis.text.x  = element_text(angle = 90, vjust=0))
+```
+Functional markers are not highly correlated with each other.
+
+Plot marker correlations for all used proteins.
+
+```{r marker_correlations_all}
+mcor = cor(df_samples_all %>% dplyr::select(protein_names_all))
+ggcorrplot(mcor, hc.order = TRUE, type = "lower", 
+           outline.col = "lightgray",
+           colors = c("#6D9EC1", "white", "#E46726"))+
+  theme(axis.text.x  = element_text(angle = 90, vjust=0))
+```
+
+There are a few phenotype markers that are slightly positively correlated such as CCR5 and CD107a.
+
+# Regression Analysis on Summarized Data
+
+Classical differential analysis approach comparing median marker expressions.
+
+## Plot Median Marker Expression
+
+Plot all celltypes.
+
+```{r median_expression_plot}
+#functional proteins
+df_median_fct = df_samples_tfm %>%
+      group_by(file_name, donor, term) %>%
+      summarise_at(protein_names_func, median)
+df_median_long_fct = gather(df_median_fct, protein_names_func, median_expr, 
+                        -file_name, -donor, -term)
+
+ggplot(df_median_long_fct, aes(protein_names_func, median_expr, color = term)) + 
+  geom_violin() + 
+  geom_jitter(width = 0.2, alpha = 0.5) + 
+  facet_wrap(~ protein_names_func, nrow = 2) +
+  theme(axis.text.x = element_blank()) +
+  ggtitle("NK")
+
+#all proteins
+df_median_all = df_samples_all %>%
+      group_by(file_name, donor, term) %>%
+      summarise_at(protein_names_all, median)
+df_median_long_all = gather(df_median_all, protein_names_all, median_expr, 
+                        -file_name, -donor, -term)
+```
+
+Zoom in on marker IFNg and CD66
+
+```{r median_expression_plot_pstat1}
+ggplot(df_median_fct, aes(term, IFNg, color = term)) + 
+  geom_violin() + 
+  geom_jitter(width = 0.2, alpha = 0.5) + 
+  theme(axis.text.x = element_blank())
+
+ggplot(df_median_all, aes(term, CD66, color = term)) + 
+  geom_violin() + 
+  geom_jitter(width = 0.2, alpha = 0.5) + 
+  theme(axis.text.x = element_blank())
+```
+
+As their are so few datapoints it is hard to make conclusive statements.
+
+## Linear Mixed Model
+
+Mixed model with median expression as response variable, experimental condition as explanatory variable, and donor as random effect. Fit separate models for each protein.
+
+```{r median_expression_fit_separate}
+calc_pvalue = function(fit) {
+  summ = summary(fit)
+  coefficients(summ)["termPost-boost", "Pr(>|t|)"]
+}
+#functional markers
+df_median_long_fct = gather(df_median_fct, protein_name, median_expr, 
+                        -file_name, -donor, -term)
+df_fits_fct = df_median_long_fct %>% 
+  group_by(protein_name) %>%
+  nest() %>% 
+  mutate(fit = map(data, ~ lmer(median_expr ~ term + (1|donor), .))) %>%
+  mutate(pvalue_unadj = map_dbl(fit, ~ calc_pvalue(.))) %>%
+  mutate(pvalue_adj = p.adjust(pvalue_unadj, method = "BH")) %>%
+  dplyr::select(protein_name, pvalue_adj)
+df_fits_fct
+df_fits_fct %>% 
+  dplyr::filter(pvalue_adj < 0.05) %>% 
+  print(n = Inf)
+
+#all used markers
+df_median_all$term %<>% factor(levels=c("Post-prime", "Post-boost"))
+df_median_long_all = gather(df_median_all, protein_name, median_expr, 
+                        -file_name, -donor, -term)
+df_fits_all = df_median_long_all %>% 
+  group_by(protein_name) %>%
+  nest() %>% 
+  mutate(fit = map(data, ~ lmer(median_expr ~ term + (1|donor), .))) %>%
+  mutate(pvalue_unadj = map_dbl(fit, ~ calc_pvalue(.))) %>%
+  mutate(pvalue_adj = p.adjust(pvalue_unadj, method = "BH")) %>%
+  dplyr::select(protein_name, pvalue_adj)
+df_fits_all
+df_fits_all %>% 
+  dplyr::filter(pvalue_adj < 0.05) %>% 
+  print(n = Inf)
+```
+None of the 6 functional proteins seem to be significant. 
+Looking at all used proteins, CD66 and HLADR are significant.
+
+# Regression Analysis on All The Data
+
+For the regression analysis, we will first focus on the functional proteins. We will then look at all used markers.
+
+#Functional proteins
+
+## Generalized Linear Mixed Model for functional proteins
+
+Fit a Generalized Linear Mixed Model (GLMM) with donor random effects. This function is a wrapper around the package `mbest`.
+
+```{r glmm_fit, message= FALSE, error=FALSE}
+glmm_fit = CytoGLMM::cytoglmm(df_samples_tfm, 
+                              protein_names = protein_names_func,
+                              condition = "term", group = "donor")
+glmm_fit
+plot(glmm_fit)
+summary(glmm_fit) %>% dplyr::filter(pvalues_adj < 0.05)
+```
+
+Add IL10, IL4, IFNg, MIP1B into one marker.
+
+```{r glmm_fit_combine, message= FALSE, error=FALSE}
+df_samples_tfm %<>% mutate(signif_sum = IL10+IL4+IFNg+MIP1B)
+protein_names_sum = c(
+  "signif_sum", 
+  protein_names_func[!protein_names_func %in% c("IL10", "IL4", "IFNg", "MIP1B")]
+)
+glmm_fit = CytoGLMM::cytoglmm(df_samples_tfm, 
+                              protein_names = protein_names_sum,
+                              condition = "term", group = "donor")
+plot(glmm_fit)
+summary(glmm_fit) %>% dplyr::filter(pvalues_adj < 0.05)
+```
+
+Take differences between IL10, IL4, IFNg, MIP1B.
+
+```{r glmm_fit_differences, message= FALSE, error=FALSE}
+df_samples_tfm %<>% mutate(IL10_minus_MIP1B = IL10-MIP1B)
+df_samples_tfm %<>% mutate(IL4_minus_MIP1B = IL4-MIP1B)
+df_samples_tfm %<>% mutate(IFNg_minus_MIP1B = IFNg-MIP1B)
+protein_names_diff = c(
+  "IL10_minus_MIP1B","IL4_minus_MIP1B","IFNg_minus_MIP1B",
+  protein_names_func[!protein_names_func %in% c("IL10","IL4", "IFNg")]
+)
+glmm_fit = CytoGLMM::cytoglmm(df_samples_tfm, 
+                              protein_names = protein_names_diff,
+                              condition = "term", group = "donor")
+plot(glmm_fit)
+summary(glmm_fit) %>% dplyr::filter(pvalues_adj < 0.05)
+```
+
+Add interactions between IL10, IL4, IFNg, MIP1B.
+
+```{r glmm_fit_interaction, message= FALSE, error=FALSE}
+#2
+df_samples_tfm %<>% mutate(IL10_IL4 = IL10*IL4)
+df_samples_tfm %<>% mutate(IL10_IFNg = IL10*IFNg)
+df_samples_tfm %<>% mutate(IL10_MIP1B = IL10*MIP1B)
+df_samples_tfm %<>% mutate(IL4_IFNg = IL4*IFNg)
+df_samples_tfm %<>% mutate(IL4_MIP1B = IL4*MIP1B)
+df_samples_tfm %<>% mutate(IFNg_MIP1B = IFNg*MIP1B)
+#3
+df_samples_tfm %<>% mutate(IL10_IL4_IFNg = IL10*IL4*IFNg)
+df_samples_tfm %<>% mutate(IL10_IL4_MIP1B = IL10*IL4*MIP1B)
+df_samples_tfm %<>% mutate(IL10_IFNg_MIP1B = IL10*IFNg*MIP1B)
+df_samples_tfm %<>% mutate(IL4_IFNg_MIP1B = IL4*IFNg*MIP1B)
+#4
+df_samples_tfm %<>% mutate(IL10_IL4_IFNg_MIP1B = IL10*IL4*IFNg*MIP1B)
+protein_names_interactions = c(protein_names_func,"IL10_IL4","IL10_IFNg", "IL10_MIP1B","IL4_IFNg", "IL4_MIP1B", "IFNg_MIP1B", "IL10_IL4_IFNg", "IL10_IL4_MIP1B", "IL10_IFNg_MIP1B", "IL4_IFNg_MIP1B", "IL10_IL4_IFNg_MIP1B")
+glmm_fit = CytoGLMM::cytoglmm(df_samples_tfm, 
+                              protein_names = protein_names_interactions,
+                              condition = "term", group = "donor")
+plot(glmm_fit)
+summary(glmm_fit) %>% dplyr::filter(pvalues_adj < 0.05)
+```
+
+## Generalized Linear Model with Bootstrap for functional proteins
+
+Instead of modeling the donor effect, we can use bootstrap resampling. In our experience, this type of regression gives also good results when samples are not matched between conditions on the same donor.
+
+```{r glm_fit}
+glm_fit = CytoGLMM::cytoglm(df_samples_tfm, 
+                            num_boot = 100,
+                            protein_names = protein_names_func,
+                            condition = "term", group = "donor",
+                            cell_n_subsample = 1000, # Christof: to save memory
+                            num_cores = 1 # Christof: to save memory
+                            ) 
+glm_fit
+plot(glm_fit)
+summary(glm_fit) %>% dplyr::filter(pvalues_adj < 0.05)
+```
+
+## Mixture of Regressions for functional proteins
+
+Fit a mixture of regression model to identity clusters of donors or outliers. This function is a wrapper around the package `flexmix`.
+
+```{r mix_fit}
+num_donors = nlevels(as.factor(df_samples_tfm$donor))
+mix_fit = CytoGLMM::cytoflexmix(df_samples_tfm, 
+                                protein_names = protein_names_func,
+                                condition = "term", group = "donor", 
+                                ks = 1:num_donors,
+                                cell_n_subsample = 5000, # Christof: to save memory
+                                num_cores = 2 # Christof: to save memory
+                                )
+plot(mix_fit)
+```
+
+The plotting function automatically uses the BIC criterion to select the number of clusters. In this case, it picks 10 clusters.
+
+```{r bic_model_selection, fig.small=TRUE}
+plot_model_selection(mix_fit)
+```
+
+#All used proteins
+
+## Generalized Linear Mixed Model for all used proteins
+
+Fit a Generalized Linear Mixed Model (GLMM) with donor random effects. This function is a wrapper around the package `mbest` [@perry2017fast].
+
+NOTE TO SELF: Doing it will all cells crashed the computer
+```{r glmm_fit_all, message= FALSE, error=FALSE}
+glmm_fit_all = CytoGLMM::cytoglmm(df_samples_all, 
+                              protein_names = protein_names_all,
+                              condition = "term", group = "donor",
+                              cell_n_subsample = 3000, # to save memory
+	                            num_cores = 1
+                              )
+glmm_fit_all
+plot(glmm_fit_all)
+summary(glmm_fit_all) %>% dplyr::filter(pvalues_adj < 0.05)
+summary(glmm_fit_all) %>% dplyr::filter(pvalues_adj < 0.05) 
+```
+
+Add CD66, CD107a, CD56, HLADR, CD45, IFNg, CD11a, MIP1B, IL10, CD8, CD2, CD62L, IL4, CD3 into one marker.
+
+```{r glmm_fit_combine_all, message= FALSE, error=FALSE}
+df_samples_all %<>% mutate(signif_sum = CD66+CD107a+CD56+HLADR+CD45+IFNg+CD11a+MIP1B+IL10+CD8+CD2+CD62L+IL4+CD3)
+protein_names_sum_all = c(
+  "signif_sum", 
+  protein_names_all[!protein_names_all %in% c("CD66", "CD107a", "CD56", "HLADR", "CD45", "IFNg", "CD11a", "MIP1B", "IL10", "CD8", "CD2", "CD62L", "IL4", "CD3")]
+)
+glmm_fit_all = CytoGLMM::cytoglmm(df_samples_all, 
+                              protein_names = protein_names_sum_all,
+                              condition = "term", group = "donor",
+                              cell_n_subsample = 3000,
+	                            num_cores = 1
+                              )
+plot(glmm_fit_all)
+summary(glmm_fit_all) %>% dplyr::filter(pvalues_adj < 0.05)
+```
+
+## Generalized Linear Model with Bootstrap for all used proteins
+
+Instead of modeling the donor effect, we can use bootstrap resampling. In our experience, this type of regression gives also good results when samples are not matched between conditions on the same donor.
+
+```{r glm_fit_all}
+glm_fit_all = CytoGLMM::cytoglm(df_samples_all, 
+                            num_boot = 100,
+                            protein_names = protein_names_all,
+                            condition = "term", group = "donor",
+                            cell_n_subsample = 3000, # Christof: to save memory
+                            num_cores = 1 # Christof: to save memory
+                            ) 
+glm_fit_all
+plot(glm_fit_all)
+summary(glm_fit_all) %>% dplyr::filter(pvalues_adj < 0.05)
+```
+
+With bootstrapping, the following protein markers are shown to be significantly different CD107a, CD11a, CD16, CD2, CD3, CD45, CD56, CD62L, CD66, CD8, HLADR, IFNg, IL10, IL4, MIP1B
+
+
+## Mixture of Regressions for all used proteins
+
+Fit a mixture of regression model to identity clusters of donors or outliers. This function is a wrapper around the package `flexmix` [@grun2007fitting].
+
+NOTE TO SELF: Cell_n_subsample = 5000 instead of 1000 CS set; num_cores = 2 --> takes a few seconds but doesn't crash computer and get 3 cluster assignments instead of just 1.
+
+```{r mix_fit_all}
+num_donors_all = nlevels(as.factor(df_samples_all$donor))
+mix_fit_all = CytoGLMM::cytoflexmix(df_samples_all, 
+                                protein_names = protein_names_all,
+                                condition = "term", group = "donor", 
+                                ks = 1:num_donors_all,
+                                cell_n_subsample = 6000, # Christof: to save memory
+                                num_cores = 1 # Christof: to save memory
+                                )
+plot(mix_fit_all)
+```
+
+The plotting function automatically uses the BIC criterion to select the number of clusters. In this case, it picks 10 clusters.
+
+```{r bic_model_selection_all, fig.small=TRUE}
+plot_model_selection(mix_fit_all)
+```
+
+# SummarizedExperiment
+
+We create a ``SummarizedExperiment`` object containing marker, sample table, and untransformed protein counts. This way we can store all the information of this experiment in one file and load it again in subsequent analyses.
+
+```{r create_summarized_experiment}
+tb_marker %<>% dplyr::filter(type != "none")
+d_combined = df_samples_all %>% 
+  select(tb_marker$protein_name) %>%
+  dplyr::mutate_all(.funs = trans_func) %>%
+  dplyr::mutate_all(.funs = round) %>%
+  as.matrix
+row_data = df_samples_all %>% 
+  select(sample_info_names) %>% 
+  as.data.frame
+col_data = tb_marker %>% as.data.frame
+se_palgen2019vaccine = SummarizedExperiment(
+  assays = list(exprs = d_combined),
+  colData = col_data,
+  rowData = row_data
+)
+save(se_palgen2019vaccine, file = "se_palgen2019vaccine.Rdata")
+```
+
+#Discussion
+
+Regarding the output of the generalized linear mixed model for all proteins. Fourteen proteins were found to be significantly different between prime and boost conditions: CD66, CD107a, CD56, HLADR, CD45, IFNg, CD11a, MIP1B, IL10, CD8, CD2, CD62L, IL4, CD3. 
+
+Without modeling the donor effect, bootstrapping can be done which also gives good results. The following protein markers are shown to be significantly different with this technique CD107a, CD11a, CD16, CD2, CD3, CD45, CD56, CD62L, CD66, CD8, HLADR, IFNg, IL10, IL4, MIP1B. Except for the additional CD16, all other protein markers found are identical.
+
+In comparison, Palgen et al. (2018) found the following proteins to be significantly upregulated by Natural Killer cells in the boost condition: Granzyme B, CD107a, perforin, CD69, CD66, CCR5, CD11c, CD16, and, slightly less strongly, CD11a. They venture a number of possible explanations to these findings in their discussion section. 
+
+The overlap between the two results is relatively similar, both found the two following markers: CD66 and CD107a. For all other proteins, the other method did not find the same result. This high discrepancy may be due to a number of reasons.
+- Sample size is very small and there is very high between donor variation
+- Different statistical methods were applied (with different regularization)
+  - PERSONAL: Look more into stats!
+- Almost all proteins do not seem to differ strongly between the two conditions and have rather large standard deviations (PRODUCE GRAPH? look at SD and Boost - Prime graph with zero line - in PLMM - can do equivalent?)
+- Another explanation for the difference is that I am only using a subset of the data. For simplicity sake to not incorporate the different time points.
+
+#Conclusion
+
+# Session Info {.unnumbered}
+
+```{r session_info}
+sessionInfo()
+```

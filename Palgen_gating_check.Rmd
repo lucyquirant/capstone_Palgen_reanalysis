@@ -1,0 +1,84 @@
+---
+title: "Palgen_Second_Gating_check"
+author: "Lucy Quirant"
+date: "6/6/2019"
+output: 
+  html_document:
+    code_folding: show
+    highlight: tango
+    toc: true
+    toc_depth: 3
+    number_sections: true
+---
+
+## Goal
+
+Find out if the ```fcs``` files are gated to NK cells. Two baseline available, 19 days before first injection (BPD019) and just before the first injection (PPD000), however for the second time point only 3 out of 4 samples are available.
+
+## Prerequisites
+
+```{r packages_and_other_useful_things, warning = FALSE, message = FALSE}
+library("flowCore")
+library("tidyverse")
+library("magrittr")
+```
+
+## Load Data
+
+Manually downloaded fcs file from [here](http://flowrepository.org/id/FR-FCM-ZYPY).
+
+```{r load_data}
+fcs = read.FCS("FlowRepository_FR-FCM-ZYPY_files/BPD019H00_BB078.fcs", transformation = FALSE)
+tb_fcs = as_tibble(exprs(fcs))
+isotope = pData(parameters(fcs))[,"name"]
+protein_name = pData(parameters(fcs))[,"desc"]
+instrument_min = pData(parameters(fcs))[,"minRange"]
+insturment_max = pData(parameters(fcs))[,"maxRange"]
+tb_marker = tibble(isotope, protein_name, instrument_min, insturment_max)
+tb_fcs %<>% rename_at(vars(tb_marker$isotope), ~ tb_marker$protein_name)
+exclude_cols = which(names(tb_fcs) %in% 
+                       c("Time", "cells", "File Number", "Cell_length"))
+tb_fcs = tb_fcs[, -exclude_cols]
+```
+
+## Plot Expressions
+
+According to their paper in Table 2, page 4: 
+
+"For each sample, the number of leukocytes detected by the CyTOF (after exclusion of double-positive CD3+CD66+ eosinophils) is indicated. Not available samples are indicated na."
+
+So let's check the CD3 and CD66 markers.
+
+```{r leukocytes_cells_excluding_eosinophils}
+plot_marker = function(pname) {
+  limits = tb_marker %>% dplyr::filter(protein_name == pname)
+  # variance stabilizing transformation
+  varstab = function(x) asinh(x/5)
+  tb_fcs %>% 
+    mutate_all(varstab) %>% 
+    ggplot(aes_string(pname)) +
+    geom_histogram(bins = 100) +
+    xlim(varstab(limits$instrument_min), 
+         varstab(limits$insturment_max)) +
+    ggtitle("Histogram of Marker Counts")
+}
+plot_marker("CD3")
+plot_marker("CD66")
+```
+
+According to their paper on page 6:
+
+"NK cells were gated as CD66-CD3-CD20-CD14-CD8+ cells using FlowJo 9 software (FlowJo, Ashland, USA). The absolute count numbers were calculated as the percentage of NK cells among all cells × leukocyte count (CBC)."
+
+So, let's also check CD20, CD14, and CD8.
+
+```{r nk_cels}
+plot_marker("CD20")
+plot_marker("CD14")
+plot_marker("CD8")
+plot_marker("CD56")
+plot_marker("CD107a")
+plot_marker("CD16")
+plot_marker("NKG2A")
+plot_marker("HLADR")
+```

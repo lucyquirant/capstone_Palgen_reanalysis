@@ -1,0 +1,579 @@
+---
+title: "Palgen_full_dataset"
+author: "Lucy Quirant"
+date: "6/5/2019"
+output: 
+  html_document:
+    code_folding: show
+    highlight: tango
+    toc: true
+    toc_depth: 3
+    number_sections: true
+---
+
+Doing tests on the full dataset
+1. Make new file with full dataset like for Palgen workflow
+2. Make graphs with median of each donor for all time points - CD66, CD45, etc.
+3. Model a spline regression for each marker on all timepoints
+
+Load packages.
+```{r load_packages, message= FALSE, error=FALSE}
+library("CytoGLMM")
+library("tidyverse")
+library("magrittr")
+library("FlowRepositoryR")
+library("flowCore")
+library("openCyto")
+library("ggcyto")
+library("scales")
+library("parallel")
+library("RColorBrewer")
+library("ggcorrplot")
+library("SummarizedExperiment")
+library("lme4")
+library("lmerTest")
+library(mgcv)
+```
+
+```{r}
+# setting computational resources
+ncores = parallel::detectCores()
+```
+
+## Data formatting - sample table
+
+After downloading the data, a sample table is created by parsing the `fcs` filenames.
+```{r}
+fcs_filesVA2 = list.files(path = "FlowRepository_FR-FCM-ZYPY_files", pattern = "fcs")
+
+#Make new column with three levels related to term
+map_term = function(x) {
+  if (str_detect(x, "BPD019H00|PPD000H00")) "Before-prime" 
+  else if (str_detect(x, "PPD000H03|PPD000H06|PPD001H00|PPD003H00|PPD014H00|PBD000H00")) "Post-prime"
+  else if (str_detect(x, "PBD000H03|PBD000H06|PBD001H00|PBD003H00")) "Post-boost"
+  else NA
+}
+
+sample_tableVA2 = tibble(
+  donor = str_extract(fcs_filesVA2, "_B[B-D]{1}..."),
+  term = str_extract(fcs_filesVA2, "..D0..H0.") %>% as.factor,
+  grouped_term = sapply(fcs_filesVA2, map_term) %>% as.factor,
+  file_name = paste0("FlowRepository_FR-FCM-ZYPY_files/",fcs_filesVA2)
+)
+sample_tableVA2$donor = gsub("_", "", sample_tableVA2$donor)
+
+sample_tableVA2
+```
+
+##Marker table
+
+A marker table is created by extracting the marker isotopes and protein names. A third column is added to determine whether the markers were used for identifying cells (phenotype), are functional proteins, or were unused. Palgen et al. (2019) state in their paper that due to low reactivity multiple markers needed to be excluded from the analysis.
+```{r}
+# names of markers used for gating extracted from the paper
+map_type = function(x) {
+  if (str_detect(x, paste(c("CD66", "HLADR", "CD3", "CD107a", "CD8", "CD45", "GranzymeB", "CD56", "CD62L", "CD4", "CD11a", "CD2", "CD7", "NKG2D", "CD11c", "CD69", "CD25", "CD16", "CCR5", "CXCR4", "CD14", "perforine", "NKG2A", "CD20", "CCR7"),collapse = '|'))) "phenotype"
+  else if (str_detect(x, paste(c("Di", "Time", "Cell_length", "cells", "File Number"),collapse = '|'))) "unused"
+  else "function"
+}
+
+#Creating marker table
+y <- sample_tableVA2$file_name[1]
+fcs = read.FCS(y, transformation = FALSE)
+
+isotope = pData(parameters(fcs))[,"name"]
+protein_name = pData(parameters(fcs))[,"desc"]
+type = sapply(protein_name, map_type)
+tb_marker = tibble(isotope, protein_name, type)
+tb_marker
+
+#deleting before last two rows, 43 & 44 as their protein_name was 'cells' 
+tb_marker <- tb_marker[-c(43,44), ]
+tb_marker
+```
+
+As claimed by the authors (Palgen et al., 2019) the data has been normalized and gated. The cells contained are assumed to be natural killer (NK) cells as the paper only focuses on NK cells. 
+
+###Combine the sample and marker dataset
+
+```{r, message= FALSE, error=FALSE}
+# load data
+fset2 = read.ncdfFlowSet(sample_tableVA2$file_name, mc.cores = 2) 
+pData(fset2) = cbind(pData(fset2),sample_tableVA2)
+df_samples2 = lapply(seq(fset2), function(sample_id) {
+    marker_ids = which(fset2@colnames %in% tb_marker$isotope)
+    exprs = as_tibble(exprs(fset2[[sample_id]]))[,marker_ids]
+    file_name = pData(fset2[sample_id])$file_name
+    exprs %>% add_column(file_name)
+  }) %>% bind_rows
+str(df_samples2)
+```
+
+###Re-naming columns
+```{r}
+df_samples2 %<>% inner_join(sample_tableVA2,by = "file_name")
+oldnames = tb_marker$isotope
+newnames = tb_marker$protein_name
+df_samples2 %<>% rename_at(vars(oldnames), ~ newnames)
+str(df_samples2)
+
+#factor
+df_samples2$term %<>% factor(levels = c("BPD019H00", "PPD000H00", "PPD000H03", "PPD000H06", "PPD001H00", "PPD003H00", "PPD014H00", "PBD000H00", "PBD000H03", "PBD000H06", "PBD001H00", "PBD003H00"))
+df_samples2$grouped_term %<>% factor(levels = c("Before-prime", "Post-prime", "Post-boost"))
+```
+
+Cell counts listed per donor and condition
+
+```{r list_cells_per_donor}
+table(df_samples2$donor,df_samples2$term)
+```
+
+###Selecting used proteins only & transforming data
+
+```{r select_proteins}
+#all used proteins
+protein_names_all = tb_marker %>% 
+  dplyr::filter(type != "unused") %>%
+  .$protein_name
+protein_names_all
+
+#declare columns that are not protein markers
+sample_info_names = c(names(sample_tableVA2))
+
+#transform
+trans_func = function(x) asinh(x/5)
+df_samples_tfm2 = df_samples2 %>% mutate_at(protein_names_all, trans_func)
+```
+
+###Subsample cells to a maximum number of cells per donor.
+
+Subsample data, as models on full data are computationally intensive and models are very similar. 
+```{r subsample_cells}
+ncells = 1000
+if(nrow(df_samples_tfm2) > ncells) {
+  print(paste("subsampled to",ncells,"per donor"))
+  set.seed(2019)
+  # subsample depending on max cell count
+  df_count = df_samples_tfm2 %>% group_by(donor) %>% tally() %>%
+    mutate(nnew = ifelse(n > ncells,ncells,n))
+  # create table with a data frame in one column
+  df_nested = df_samples_tfm2 %>% group_by(donor) %>% nest() %>%
+    left_join(df_count,by = "donor")
+  # subsample per donor
+  df_samples_tfm2 = df_nested %>%
+    mutate(samp = map2(data, nnew, sample_n)) %>%
+    dplyr::select(donor, samp) %>%
+    unnest()
+} else {
+  print("no subsampling done")
+}
+```
+
+## Plot Median Marker Expression
+
+Plot all celltypes.
+
+```{r median_expression_plot}
+#defining numeric term for spline regression
+df_samples_tfm2$numeric_term = df_samples_tfm2$term
+df_samples_tfm2$numeric_term = as.numeric(df_samples_tfm2$numeric_term)
+
+df_samples_tfm2
+
+#all proteins
+df_median_fct2 = df_samples_tfm2 %>%
+      group_by(file_name, donor, term, grouped_term, numeric_term) %>%
+      summarise_at(protein_names_all, median)
+
+df_median_fct2
+```
+
+Make combined table to plot everything on same diagram (median markers & spline)
+```{r}
+#convert term into timepoints in hours (& into rank)
+df_combined2 = df_samples_tfm2 %>% mutate(
+  term_hours = case_when(term == "BPD019H00" ~ 0,
+                  term == "PPD000H00" ~ 456,
+                  term == "PPD000H03" ~ 459,
+                  term == "PPD000H06" ~ 462,
+                  term == "PPD001H00" ~ 480,
+                  term == "PPD003H00" ~ 528,
+                  term == "PPD014H00" ~ 792,
+                  term == "PBD000H00" ~ 1848,
+                  term == "PBD000H03" ~ 1851,
+                  term == "PBD000H06" ~ 1854,
+                  term == "PBD001H00" ~ 1872,
+                  term == "PBD003H00" ~ 1920)
+)
+
+
+#median marker plotting
+ggplot(df_combined2, aes(term_hours, CD66)) + 
+  geom_point() + geom_smooth(method = gam) +
+  theme(axis.text.x = element_text(angle = 45, vjust=0))
+
+model <- gam(CD66 ~ s(numeric_term), data = df_samples_tfm2)
+ggplot(df_samples_tfm2, aes(numeric_term, CD66)) + 
+   geom_smooth(method = mgcv::gam, formula = CD66 ~ s(numeric_term), data = df_samples_tfm2) +
+  theme(axis.text.x = element_text(angle = 45, vjust=0))
+
+#add median column
+#facet on condition - is grouped_term
+#creates phases - include 0 hours of the condition - phase 1 prime & phase 2 boost -> can facet_wrap
+```
+
+```{r}
+#plots successfully the median markers in base R
+plot(df_median_fct2$numeric_term, df_median_fct2$CD66, type = "p", col=df_median_fct2$grouped_term)
+
+#plots successfully the spline regression - y axis different
+model <- gam(CD66 ~ s(numeric_term), data = df_samples_tfm2)
+plot(model,
+     main = "Spline regression of protein marker CD66 for all timepoints",
+     xlab = "term")
+plot(model)
+
+#make model !
+model <- gam(CD66 ~ s(numeric_term), data = df_samples_tfm2)
+
+#try to combine two plots - WORKS ! y axis overwritten, not same scale, unreadable y label name - points look pretty close to the spline regression
+plot(df_median_fct2$numeric_term, df_median_fct2$CD66, type = "p", col=df_median_fct2$grouped_term)
+par(new=TRUE)
+plot(model)
+
+unique(df_median_fct2$grouped_term)
+
+#spline regression model & x axis values
+model <- gam(CD66 ~ s(numeric_term), data = df_samples_tfm2)
+lablist = c("BPD019H00", "PPD000H00", "PPD000H03", "PPD000H06", "PPD001H00", "PPD003H00", "PPD014H00", "PBD000H00", "PBD000H03", "PBD000H06", "PBD001H00", "PBD003H00")
+
+#base R combined plots - make look prettier
+plot(df_median_fct2$numeric_term, df_median_fct2$CD66, col=df_median_fct2$grouped_term, main = "Spline regression and donor median markers of CD66 for all timepoints",
+     xlab = "time", ylab = "CD66", xaxt="n")
+axis(1, at=1:12, labels=FALSE)
+text(seq(1, 12, by=1), par("usr")[3] - 0.2, labels = lablist, srt = 45, adj = c(1.1,1.1), pos = 1, xpd = TRUE, cex=.8)
+par(new=TRUE)
+plot(model, axes = FALSE, ann=FALSE)
+
+#tried to put under first plot, doesn't work - doesn't plot - no error given
+legend(x=14, y=3,legend=paste(c("Before-prime", "Post-prime", "Post-boost")),pch=rep(16,each=3),bty="n",cex=0.7,pt.cex=0.7)
+#doesn't work either
+legend(x=14, y=3, legend=paste(c("Before-prime", "Post-prime", "Post-boost")), pch = "sSvV", col = c(1, 3),
+       cex = 1+(-1:2)/8)
+#suggested to use points() or lines()
+#lines(gam(CD66 ~ s(numeric_term), data = df_samples_tfm2))
+```
+```{r}
+plot(df_samples_tfm2$numeric_term, df_samples_tfm2$CD66)
+lines(smooth.spline(df_samples_tfm2$numeric_term, df_samples_tfm2$CD66))
+
+plot(df_median_fct2$numeric_term, df_median_fct2$CD66, type = "p", col=df_median_fct2$grouped_term)
+lines(smooth.spline(df_samples_tfm2$numeric_term, df_samples_tfm2$CD66))
+
+#lines a bit choppier, each x point is a knot, doesn't change y axis
+plot(model)
+lines(smooth.spline(df_samples_tfm2$numeric_term, df_samples_tfm2$CD66))
+```
+
+
+
+Zoom in on marker CD66
+
+In spline regression, PPD0H06 = 4 and PBD0H06 = 10
+```{r median_expression_plot_CD66}
+#median marker plotting
+ggplot(df_median_fct2, aes(term, CD66, color = grouped_term)) + 
+  geom_jitter(width = 0.2, alpha = 0.5) + 
+  theme(axis.text.x = element_text(angle = 45, vjust=0))
+
+#median marker plotting per donor
+ggplot(df_median_fct2, aes(term, CD66, color = grouped_term)) + 
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  facet_wrap(~donor) + 
+  theme(axis.text.x = element_text(angle = 45, vjust=0)) 
+
+#spline regression
+model <- gam(CD66 ~ s(numeric_term), data = df_samples_tfm2)
+plot(model,
+     main = "Spline regression of protein marker CD66 for all timepoints",
+     xlab = "term")
+#abline(v = 3, col = "green") - Error "plot.new has not been called yet"
+```
+Prime seems to be similar to beginning of prime and then downards slope. Just before boost much higher, then downwards slope again within boost. Much more significant shift, y axis up to 4.
+! Dip after prime may also be explained by total NK cell amounts going down authors said after vaccination.
+Really seems that each injection causes a spike in CD66 and it then slowly goes down,and at boost it's a much steeper increase then for the prime. Numbers on y axis also much higher than others (up to 4). Interestingly, strong increase happens just before the boost injection. One of the markers where donors are the most alike, less spread.
+
+Looking into CD45
+```{r median_expression_plot_CD45}
+ggplot(df_median_fct2, aes(term, CD45, color = grouped_term)) + 
+  geom_jitter(width = 0.2, alpha = 0.5) + 
+  theme(axis.text.x = element_text(angle = 45, vjust=0)) + ggtitle("CD45 median marker expressions per donor")
+
+#spline
+model <- gam(CD45 ~ s(numeric_term), data = df_samples_tfm2)
+plot(model,
+     main = "Spline regression of protein marker CD45 for all timepoints",
+     xlab = "term")
+
+#combined plot
+model <- gam(CD45 ~ s(numeric_term), data = df_samples_tfm2)
+
+plot(df_median_fct2$numeric_term, df_median_fct2$CD45, col=df_median_fct2$grouped_term, main = "Spline regression and donor median markers of CD45 for all timepoints",
+     xlab = "time", ylab = "CD45", xaxt="n")
+axis(1, at=1:12, labels=FALSE)
+text(seq(1, 12, by=1), par("usr")[3] - 0.1, labels = lablist, srt = 45, adj = c(1.1,1.1), pos = 1, xpd = TRUE, cex=.8)
+par(new=TRUE)
+plot(model, axes = FALSE, ann=FALSE)
+
+#simpler spline regression
+plot(df_median_fct2$numeric_term, df_median_fct2$CD45, col=df_median_fct2$grouped_term)
+lines(smooth.spline(df_samples_tfm2$numeric_term, df_samples_tfm2$CD45))
+```
+CD45 also seems to start off quite high before prime, then go down after prime vaccination, then before boost it is higher again and gently goes down after boost. Y axis goes up to 2. Prime doesn't seem to stimulate CD45 much initially. Might be a marker that takes longer to take effect.
+
+Looking further into CD56
+```{r median_expression_plot_CD56}
+ggplot(df_median_fct2, aes(term, CD56, color = grouped_term)) + 
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  theme(axis.text.x = element_text(angle = 45, vjust=0))
+
+ggplot(df_median_fct2, aes(term, CD56, color = grouped_term)) + 
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  facet_wrap(~donor) + theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust=0))
+
+#spline regression
+model <- gam(CD56 ~ s(numeric_term), data = df_samples_tfm2)
+plot(model,
+     main = "Spline regression of protein marker CD56 for all timepoints",
+     xlab = "term")
+
+#combined plot
+model <- gam(CD56 ~ s(numeric_term), data = df_samples_tfm2)
+
+plot(df_median_fct2$numeric_term, df_median_fct2$CD56, col=df_median_fct2$grouped_term, main = "Spline regression and donor median markers of CD56 for all timepoints",
+     xlab = "time", ylab = "CD56", xaxt="n")
+axis(1, at=1:12, labels=FALSE)
+text(seq(1, 12, by=1), par("usr")[3] - 0.2, labels = lablist, srt = 45, adj = c(1.1,1.1), pos = 1, xpd = TRUE, cex=.8)
+par(new=TRUE)
+plot(model, axes = FALSE, ann=FALSE)
+
+#simple spline
+plot(df_median_fct2$numeric_term, df_median_fct2$CD56, type = "p", col=df_median_fct2$grouped_term)
+lines(smooth.spline(df_samples_tfm2$numeric_term, df_samples_tfm2$CD56))
+```
+
+General downwards slope from prime to boost. Large variation in prime amongst donors. Scale only goes up to 1.2 on y axis. Facetwrap interesting as see downards slope better, especially BB078 and BB231 as simply their baseline differs.
+
+Looking into HLADR
+```{r median_expression_plot_HLADR}
+ggplot(df_median_fct2, aes(term, HLADR, color = grouped_term)) + 
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  theme(axis.text.x = element_text(angle = 45, vjust=0))
+
+ggplot(df_median_fct2, aes(term, HLADR, color = grouped_term)) + 
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  facet_wrap(~donor) + theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust=0))
+
+#spline regression
+model <- gam(HLADR ~ s(numeric_term), data = df_samples_tfm2)
+plot(model,
+     main = "Spline regression of protein marker HLADR for all timepoints",
+     xlab = "term")
+```
+Seems to have slightly similar pattern to CD45, higher in boost than in prime in general, not strong downwards slopes. Y axis quite small ongy going to 0.6.
+
+Looking into CD107a
+```{r median_expression_plot_CD107a}
+ggplot(df_median_fct2, aes(term, CD107a, color = grouped_term)) + 
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  theme(axis.text.x = element_text(angle = 45, vjust=0))
+
+ggplot(df_median_fct2, aes(term, CD107a, color = grouped_term)) + 
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  facet_wrap(~donor) +
+  theme(axis.text.x = element_text(angle = 45, vjust=0))
+
+#spline regression
+model <- gam(CD107a ~ s(numeric_term), data = df_samples_tfm2)
+plot(model,
+     main = "Spline regression of protein marker CD107a for all timepoints",
+     xlab = "term")
+```
+No clear pattern. Seems to be in general, per donor, higher beginning and at boost end, but inconsistent. Y axis is only up to 0.75.
+
+Looking into perforin
+```{r}
+model <- gam(perforine ~ s(numeric_term), data = df_samples_tfm2)
+
+plot(model,
+     main = "Spline regression of protein marker perforin for all timepoints",
+     xlab = "term")
+
+ggplot(df_median_fct2, aes(term, perforine, color = grouped_term)) + 
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  theme(axis.text.x = element_text(angle = 45, vjust=0))
+
+ggplot(df_median_fct2, aes(term, perforine, color = grouped_term)) + 
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  facet_wrap(~donor) +
+  theme(axis.text.x = element_text(angle = 45, vjust=0))
+```
+
+##Go through markers that Palgen found and my models did not
+
+Look into CD16
+```{r median_expression_plot_CD16}
+#median marker plotting
+ggplot(df_median_fct2, aes(term, CD16, color = grouped_term)) + 
+  geom_jitter(width = 0.2, alpha = 0.5) + 
+  theme(axis.text.x = element_text(angle = 45, vjust=0))
+
+#median marker plotting per donor
+ggplot(df_median_fct2, aes(term, CD16, color = grouped_term)) + 
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  facet_wrap(~donor) + 
+  theme(axis.text.x = element_text(angle = 45, vjust=0)) 
+
+#spline regression
+model <- gam(CD16 ~ s(numeric_term), data = df_samples_tfm2)
+plot(model,
+     main = "Spline regression of protein marker CD16 for all timepoints",
+     xlab = "term")
+
+model <- gam(CD16 ~ s(numeric_term), data = df_samples_tfm2)
+
+plot(df_median_fct2$numeric_term, df_median_fct2$CD16, col=df_median_fct2$grouped_term, main = "Spline regression and donor median markers of CD16 for all timepoints",
+     xlab = "time", ylab = "CD16", xaxt="n")
+axis(1, at=1:12, labels=FALSE)
+text(seq(1, 12, by=1), par("usr")[3] - 0.05, labels = lablist, srt = 45, adj = c(1.1,1.1), pos = 1, xpd = TRUE, cex=.8)
+par(new=TRUE)
+plot(model, axes = FALSE, ann=FALSE)
+```
+CD16 seems to clearly go up after the boost condition. The reason I did not find it is that the increase seems to be omst prominent one day after the boost. It is still very low 6 hours after the boost injection.
+
+Zoom in on marker granzyme B
+
+```{r median_expression_plot_GranzymeB}
+#median marker plotting
+ggplot(df_median_fct2, aes(term, GranzymeB, color = grouped_term)) + 
+  geom_jitter(width = 0.2, alpha = 0.5) + 
+  theme(axis.text.x = element_text(angle = 45, vjust=0))
+
+#median marker plotting per donor
+ggplot(df_median_fct2, aes(term, GranzymeB, color = grouped_term)) + 
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  facet_wrap(~donor) + 
+  theme(axis.text.x = element_text(angle = 45, vjust=0)) 
+
+#spline regression
+model <- gam(GranzymeB ~ s(numeric_term), data = df_samples_tfm2)
+plot(model,
+     main = "Spline regression of protein marker GranzymeB for all timepoints",
+     xlab = "term")
+```
+Granzyme B seems relatively high before vaccination. It then goes down after the prime vaccination, and then seems generally to go bak up in boost vaccination but only too similar levels to before prime. Generally there seems to be a slight increase in 3 out of 4 animals in the boost condition as compared to the prime condition. Granzyme B is highlighted as significant by LLMM and Palgen.
+
+Looking into CD69
+```{r median_expression_plot_CD69}
+#median marker plotting
+ggplot(df_median_fct2, aes(term, CD69, color = grouped_term)) + 
+  geom_jitter(width = 0.2, alpha = 0.5) + 
+  theme(axis.text.x = element_text(angle = 45, vjust=0))
+
+#median marker plotting per donor
+ggplot(df_median_fct2, aes(term, CD69, color = grouped_term)) + 
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  facet_wrap(~donor) + 
+  theme(axis.text.x = element_text(angle = 45, vjust=0)) 
+
+#spline regression
+model <- gam(CD69 ~ s(numeric_term), data = df_samples_tfm2)
+plot(model,
+     main = "Spline regression of protein marker CD69 for all timepoints",
+     xlab = "term")
+
+#combined plot
+model <- gam(CD69 ~ s(numeric_term), data = df_samples_tfm2)
+
+plot(df_median_fct2$numeric_term, df_median_fct2$CD69, col=df_median_fct2$grouped_term, main = "Spline regression and donor median markers of CD69 for all timepoints",
+     xlab = "time", ylab = "CD69", xaxt="n")
+axis(1, at=1:12, labels=FALSE)
+text(seq(1, 12, by=1), par("usr")[3] - 0.1, labels = lablist, srt = 45, adj = c(1.1,1.1), pos = 1, xpd = TRUE, cex=.8)
+par(new=TRUE)
+plot(model, axes = FALSE, ann=FALSE)
+```
+Similar to CD16, it seems that CD69 has it's peak increase one day after the boost and therefore was not seen as significant by the models used in this thesis.
+
+Looking into CCR5
+```{r median_expression_plot_CCR5}
+#median marker plotting
+ggplot(df_median_fct2, aes(term, CCR5, color = grouped_term)) + 
+  geom_jitter(width = 0.2, alpha = 0.5) + 
+  theme(axis.text.x = element_text(angle = 45, vjust=0))
+
+#median marker plotting per donor
+ggplot(df_median_fct2, aes(term, CCR5, color = grouped_term)) + 
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  facet_wrap(~donor) + theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust=0)) 
+ggsave(filename = "CCR5 facet per donor.jpg", width = 7, height = 4)
+
+#spline regression
+model <- gam(CCR5 ~ s(numeric_term), data = df_samples_tfm2)
+plot(model,
+     main = "Spline regression of protein marker CCR5 for all timepoints",
+     xlab = "term")
+```
+CCR5 starts off relatively high, has a decrease in the beginning of prime, rises back to original levels just before the prime and then decreases again. It seems that CCR5 is temporarily downregulated by each vaccination, without a lasting effect. Palgen et al.'s conclusion that CCR5 is upregulated in the boost condition does not seem to be the case and the findings of the LLMM model seem more realistic that it is generally downregulated. If the boost condition had been measured longer than just 3 days after the vaccination, the same pattern of quantities going back to baseline may have been observed.
+They probably found significant due to one outlier.
+
+Looking into CD11c
+```{r median_expression_plot_CD11c}
+#median marker plotting
+ggplot(df_median_fct2, aes(term, CD11c, color = grouped_term)) + 
+  geom_jitter(width = 0.2, alpha = 0.5) + 
+  theme(axis.text.x = element_text(angle = 45, vjust=0))
+
+#median marker plotting per donor
+ggplot(df_median_fct2, aes(term, CD11c, color = grouped_term)) + 
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  facet_wrap(~donor) + 
+  theme(axis.text.x = element_text(angle = 45, vjust=0)) 
+
+#spline regression
+model <- gam(CD11c ~ s(numeric_term), data = df_samples_tfm2)
+plot(model,
+     main = "Spline regression of protein marker CD11c for all timepoints",
+     xlab = "term")
+
+model <- gam(CD11c ~ s(numeric_term), data = df_samples_tfm2)
+
+plot(df_median_fct2$numeric_term, df_median_fct2$CD11c, col=df_median_fct2$grouped_term, main = "Spline regression and donor median markers of CD11c for all timepoints",
+     xlab = "time", ylab = "CD11c", xaxt="n")
+axis(1, at=1:12, labels=FALSE)
+text(seq(1, 12, by=1), par("usr")[3] - 0.1, labels = lablist, srt = 45, adj = c(1.1,1.1), pos = 1, xpd = TRUE, cex=.8)
+par(new=TRUE)
+plot(model, axes = FALSE, ann=FALSE)
+```
+Similarly to CD16 and CD69, it seems that the discrepancy found in Palgen et al.'s results and mine are because the strongest increase in CD11c occured one day after the boost vaccination. It seems to fluctuate around during prime, have a slight decrease just after the boost (3 and 6 hours after), and then rise rather rapidly one day after the boost. The scale here goes up to 0.9, slightly higher than some others, nowhere near as clear as CD66 that went up to 4.
+
+Looking into CCR7
+```{r median_expression_plot_CCR7}
+#median marker plotting
+ggplot(df_median_fct2, aes(term, CCR7, color = grouped_term)) + 
+  geom_jitter(width = 0.2, alpha = 0.5) + 
+  theme(axis.text.x = element_text(angle = 45, vjust=0))
+
+#median marker plotting per donor
+ggplot(df_median_fct2, aes(term, CCR7, color = grouped_term)) + 
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  facet_wrap(~donor) + 
+  theme(axis.text.x = element_text(angle = 45, vjust=0)) 
+
+#spline regression
+model <- gam(CCR7 ~ s(numeric_term), data = df_samples_tfm2)
+plot(model,
+     main = "Spline regression of protein marker CCR7 for all timepoints",
+     xlab = "term")
+```

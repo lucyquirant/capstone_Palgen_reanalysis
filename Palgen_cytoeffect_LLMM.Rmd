@@ -1,0 +1,250 @@
+---
+title: "Plagen cytoeffect LLMM"
+author: "Lucy Quirant"
+date: "4/23/2019"
+output: 
+  html_document:
+    code_folding: show
+    highlight: tango
+    toc: true
+    toc_depth: 3
+    number_sections: true
+---
+
+#Goal of document:
+Apply the Logistic Linear Mixed Model of the cytoeffect package to the Palgen HIV dataset (2019).
+
+#cytoeffect - 2 parts: 
+A) logistic linear mixed model (LLMM); 
+B) poisson log-normal mixed model (PLMM); 
+This is part A.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Prerequisites
+
+###Parse input parameters.
+
+```{r parse_input_parameters}
+ncells = 10000 #later can set to Inf (infinite)
+seed = 0xdada
+ncores = parallel::detectCores()
+cytof_data = "se_palgen2019vaccine.Rdata"
+prefit_LLMM = paste0("cytoeffect_llmm_ncells_",ncells,".Rdata")
+prefit_LLMM
+prefit_LLMM_reduced = paste0("cytoeffect_llmm_ncells_",ncells,"_reduced.Rdata")
+prefit_LLMM_reduced
+prefit_LLMM_reduced_CD45 = paste0("cytoeffect_llmm_ncells_",ncells,"_reduced_CD45.Rdata")
+prefit_LLMM_reduced_CD45
+```
+
+###Install packages.
+
+```{r install_packages, warning=FALSE, message=FALSE, eval=FALSE}
+pkgs_needed = c("devtools","tidyverse","magrittr","SummarizedExperiment",
+                "ggthemes","cowplot")
+letsinstall = setdiff(pkgs_needed, installed.packages())
+if (length(letsinstall) > 0) {
+  source("http://bioconductor.org/biocLite.R")
+  biocLite(letsinstall)
+}
+devtools::install_github("ChristofSeiler/cytoeffect")
+```
+
+###Load packages.
+
+```{r load_packages}
+library("cytoeffect")
+library("tidyverse")
+library("magrittr")
+library("SummarizedExperiment")
+library("ggthemes")
+library("cowplot")
+theme_set(theme_few())
+```
+
+# Load Data
+
+###Load ``SummarizedExperiment`` object from CytoGLMM workflow.
+
+```{r load_summarized_experiment}
+rdata_filenames = c(cytof_data, prefit_LLMM, prefit_LLMM_reduced, prefit_LLMM_reduced_CD45)
+load(cytof_data)
+exprs = assay(se_palgen2019vaccine)
+sample_info = rowData(se_palgen2019vaccine)
+sample_info_names = names(sample_info)
+df_samples = cbind(as.data.frame(exprs), as.data.frame(sample_info))
+df_samples %<>% as.tibble
+protein_names = colData(se_palgen2019vaccine) %>% 
+  as.data.frame %>% 
+  dplyr::filter(type != "unused") %>%
+  .$protein_name
+```
+
+Transform counts.
+
+```{r transform_counts}
+df_samples %<>% mutate_at(colData(se_palgen2019vaccine)$protein_name, 
+                          function(x) asinh(x/5))
+```
+
+# Fit Model
+
+###Tally cell count.
+
+```{r cell_count}
+df_samples %>% 
+  group_by(term,donor) %>% 
+  tally %>% 
+  arrange(n)
+df_samples %>% 
+  group_by(term,donor) %>% 
+  tally %>% 
+  arrange(desc(n))
+```
+
+###Subsample cells to a maximum number of cells per donor.
+
+```{r subsample_cells}
+if(nrow(df_samples) > ncells) {
+  print(paste("subsampled to",ncells,"per donor"))
+  set.seed(seed)
+  # subsample depending on max cell count
+  df_count = df_samples %>% group_by(donor) %>% tally() %>%
+    mutate(nnew = ifelse(n > ncells,ncells,n))
+  # create table with a data frame in one column
+  df_nested = df_samples %>% group_by(donor) %>% nest() %>%
+    left_join(df_count,by = "donor")
+  # subsample per donor
+  df_samples = df_nested %>%
+    mutate(samp = map2(data, nnew, sample_n)) %>%
+    dplyr::select(donor, samp) %>%
+    unnest()
+} else {
+  print("no subsampling done")
+}
+```
+
+###Tally cell count.
+
+```{r cell_count_subsample}
+df_samples %>% group_by(term,donor) %>% tally %>% 
+  arrange(n)
+df_samples %>% group_by(term,donor) %>% tally %>% 
+  arrange(desc(n))
+```
+
+## HMC Sampling
+
+Sample from posterior distribution.
+
+```{r set_reference}
+df_samples$term %<>% factor(levels = c("Post-prime",
+                                              "Post-boost"))
+```
+
+```{r logistic_sampling}
+if(file.exists(prefit_LLMM)) {
+  load(file = prefit_LLMM)
+} else {
+  obj = cytoeffect::glmm(df_samples, protein_names, 
+                       condition = "term", group = "donor",
+                       iter = 325, warmup = 200, 
+                       num_chains = ncores)
+  save(obj,file = prefit_LLMM)
+}
+```
+
+## HMC Diagnostics
+
+Traceplot of posterior samples.
+
+```{r post_sampling, fig.wide=TRUE}
+rstan::traceplot(obj$fit_mcmc, inc_warmup = TRUE)
+rstan::traceplot(obj$fit_mcmc, inc_warmup = FALSE)
+```
+
+Some more MCMC diagnostics. According to empirically findings, Rhat > 1.1 is usually indicative of problems in the fit.
+
+```{r mcmc_diagnostics}
+pars = c("beta","sigma_donor","L_donor","z_donor")
+tb = summary(obj$fit_mcmc, 
+             pars = pars)$summary %>% 
+  as.tibble(rownames = "pars", .before = 1) %>% 
+  select(pars, n_eff, Rhat)
+tb %<>% na.omit() # Stan fills upper triangle with zeros
+tb %>% arrange(n_eff)
+tb %>% arrange(desc(Rhat))
+tb %>% summarize(min = min(n_eff), max = max(n_eff))
+tb %>% summarize(min = min(Rhat), max = max(Rhat))
+```
+
+# Results
+
+###Plot fixed effects.
+
+```{r fixed_effects, fig.small=TRUE}
+p_full = plot(obj, type = "beta") + 
+  ggtitle(expression("Fixed Effects"~beta)) +
+  xlab("log-odds of Post-boost/ Post-prime")
+p_full
+```
+
+###Extract log-odds for CD66 
+
+```{r fixed_effects_CD66}
+post_beta = rstan::extract(obj$fit_mcmc, pars = "beta")[[1]]
+post_beta %<>% as.tibble
+names(post_beta) = c("intercept",obj$protein_names)
+quantile(post_beta$CD66, probs = c(0.025, 0.975))
+quantile(exp(post_beta$CD66), probs = c(0.025, 0.975))
+```
+
+###Plot random effects.
+
+```{r random_effects}
+plot(obj, type = "sigma_donor") + 
+  ggtitle("Marker Standard Deviation"~sigma)
+ggsave("sigma_glmm_10000_v2.pdf")
+```
+
+###Plot posterior correlations.
+
+```{r posterior_correlations, fig.small=TRUE}
+plot(obj, type = "Cor_donor") + 
+  ggtitle(expression("Marker Correlations"~Omega~"(donor)"))
+ggsave("posterior_summary_cor_glmm_10000.pdf", width = 4, height = 4)
+```
+
+# Refit Without CD66
+
+###Refit model to test potentional collider confounding.
+
+```{r refit}
+protein_names = obj$protein_names[-which(obj$protein_names == "CD66")]
+if(file.exists(prefit_LLMM_reduced)) {
+  load(file = prefit_LLMM_reduced)
+} else {
+  obj = cytoeffect::glmm(df_samples, protein_names, 
+                         condition = "term", group = "donor",
+                         iter = 325, warmup = 200, 
+                         num_chains = ncores)
+  save(obj,file = prefit_LLMM_reduced)
+}
+```
+
+```{r plot_refit}
+p_reduced = plot(obj, type = "beta") + 
+  ggtitle(expression("Reduced Fixed Effects"~beta)) +
+  xlab("log-odds of Post-boost/ Post-prime")
+plot_grid(p_full, p_reduced, labels = "AUTO")
+ggsave(filename = "beta_glmm_10000_v2.pdf")
+```
+
+# Session Info {.unnumbered}
+
+```{r session_info}
+sessionInfo()
+```
