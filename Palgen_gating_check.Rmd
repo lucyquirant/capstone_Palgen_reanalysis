@@ -72,13 +72,26 @@ According to their paper on page 6:
 
 So, let's also check CD20, CD14, and CD8.
 
+Furthermore, frequently NK cells are determined by CD56 and CD16 quantities (see paper).
+
 ```{r nk_cels}
 plot_marker("CD20")
 plot_marker("CD14")
 plot_marker("CD8")
 plot_marker("CD56")
-plot_marker("CD107a")
 plot_marker("CD16")
-plot_marker("NKG2A")
-plot_marker("HLADR")
+```
+
+
+## Conclusion
+
+Two points that are unclear to me:
+
+1. The CD66 are very high---they could be granulocytes.
+2. The CD8 are very low---they could be negative, but should be positive according to their gating scheme.
+
+## Session Info
+
+```{r session_info}
+sessionInfo()
 ```
