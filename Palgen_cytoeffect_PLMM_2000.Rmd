@@ -32,6 +32,7 @@ This is part B.
 ncells = 2000
 seed = 0xdada
 ncores = parallel::detectCores()
+zenodo_url = "https://zenodo.org/record/3248781#.XQo-raeB2L9/files/"
 cytof_data = "se_palgen2019vaccine.Rdata" #created with CytoGLMM
 prefit_PLMM = paste0("cytoeffect_plmm_ncells_",ncells,".Rdata")
 prefit_PLMM
@@ -74,10 +75,19 @@ theme_set(theme_few())
 
 # Load Data
 
+###Download preprocessed data from Zenodo.
+
+```{r download_zenodo}
+rdata_filenames = c(cytof_data, prefit_PLMM)
+for(filename in rdata_filenames)
+    download.file(url = paste0(zenodo_url, filename), 
+                  destfile = filename,
+                  mode = "wb")
+```
+
 ###Load ``SummarizedExperiment`` object from CytoGLMM workflow.
 
 ```{r load_summarized_experiment}
-rdata_filenames = c(cytof_data, prefit_PLMM)
 load(cytof_data)
 exprs = assay(se_palgen2019vaccine)
 sample_info = rowData(se_palgen2019vaccine)

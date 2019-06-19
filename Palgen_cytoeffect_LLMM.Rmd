@@ -32,13 +32,12 @@ knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
 ncells = 10000 #later can set to Inf (infinite)
 seed = 0xdada
 ncores = parallel::detectCores()
+zenodo_url = "https://zenodo.org/record/3248781#.XQo-raeB2L9/files/"
 cytof_data = "se_palgen2019vaccine.Rdata"
 prefit_LLMM = paste0("cytoeffect_llmm_ncells_",ncells,".Rdata")
 prefit_LLMM
 prefit_LLMM_reduced = paste0("cytoeffect_llmm_ncells_",ncells,"_reduced.Rdata")
 prefit_LLMM_reduced
-prefit_LLMM_reduced_CD45 = paste0("cytoeffect_llmm_ncells_",ncells,"_reduced_CD45.Rdata")
-prefit_LLMM_reduced_CD45
 ```
 
 ###Install packages.
@@ -68,10 +67,14 @@ theme_set(theme_few())
 
 # Load Data
 
-###Load ``SummarizedExperiment`` object from CytoGLMM workflow.
+###Download from Zenodo preprocessed data and load ``SummarizedExperiment`` object from CytoGLMM workflow.
 
 ```{r load_summarized_experiment}
-rdata_filenames = c(cytof_data, prefit_LLMM, prefit_LLMM_reduced, prefit_LLMM_reduced_CD45)
+rdata_filenames = c(cytof_data, prefit_LLMM, prefit_LLMM_reduced)
+for(filename in rdata_filenames)
+    download.file(url = paste0(zenodo_url, filename), 
+                  destfile = filename,
+                  mode = "wb")
 load(cytof_data)
 exprs = assay(se_palgen2019vaccine)
 sample_info = rowData(se_palgen2019vaccine)
